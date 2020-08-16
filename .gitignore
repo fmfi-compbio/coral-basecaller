@@ -1,0 +1,6 @@
+*.tflite
+__pycache
+*.pyc
+.vscode
+test_data
+*.log
