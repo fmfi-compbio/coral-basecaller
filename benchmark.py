@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import time
+from datetime import datetime
 
 import tflite_runtime.interpreter as tflite
 import platform
@@ -41,11 +42,18 @@ def main():
     print(input_details["shape"])
     start = time.perf_counter()
 
-    N = 1000
+    inp = numpy.random.normal(size=input_details["shape"])
+    input_quantization = input_details["quantization"]
+    inp_rescaled = (inp / input_quantization[0] + input_quantization[1]).astype(numpy.int8)
+
+    N = 10
     for i in range(N):
-        inp = numpy.zeros(input_details["shape"], dtype="int8")
-        interpreter.set_tensor(input_details["index"], inp)
+#        inp = numpy.zeros(input_details["shape"], dtype="int8")
+        interpreter.set_tensor(input_details["index"], inp_rescaled)
+        i_start = datetime.now()
         interpreter.invoke()
+        i_time = (datetime.now() - i_start).total_seconds()
+        print("inv time", i_time, inp.shape[0] * inp.shape[1] / i_time) 
         out = interpreter.get_tensor(output_details["index"])
 
     inference_time = time.perf_counter() - start

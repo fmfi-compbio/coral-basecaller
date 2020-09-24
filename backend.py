@@ -3,6 +3,7 @@ import platform
 import numpy as np
 from scipy.special import softmax
 from fast_ctc_decode import beam_search
+from datetime import datetime
 
 EDGETPU_SHARED_LIB = {
     "Linux": "libedgetpu.so.1",
@@ -18,25 +19,39 @@ class Coral:
             experimental_delegates=[tflite.load_delegate(EDGETPU_SHARED_LIB, {})],
         )
         self.interpreter.allocate_tensors()
+        self.last_start = datetime.now()
+        self.input_details = self.interpreter.get_input_details()[0]
+        self.output_details = self.interpreter.get_output_details()[0]
 
     def input_shape(self):
         return self.interpreter.get_input_details()[0]["shape"]
 
-    def call(self, inp):
-        input_details = self.interpreter.get_input_details()[0]
-        output_details = self.interpreter.get_output_details()[0]
+    def call_raw(self, inp):
+        self.interpreter.set_tensor(
+            self.input_details["index"], inp
+        )
+        self.interpreter.invoke()
+        return self.interpreter.get_tensor(self.output_details["index"])
 
-        input_quantization = input_details["quantization"]
-        output_quantization = output_details["quantization"]
+
+    def call(self, inp):
+        start = datetime.now()
+
+        input_quantization = self.input_details["quantization"]
+        output_quantization = self.output_details["quantization"]
 
         inp_rescaled = inp / input_quantization[0] + input_quantization[1]
+        i_start = datetime.now()
         self.interpreter.set_tensor(
-            input_details["index"], inp_rescaled.astype(np.int8)
+            self.input_details["index"], inp_rescaled.astype(np.int8)
         )
 
         self.interpreter.invoke()
-        out = self.interpreter.get_tensor(output_details["index"])
+        out = self.interpreter.get_tensor(self.output_details["index"])
+        i_end = datetime.now()
         out = (out - output_quantization[1]) * output_quantization[0]
+        print(start - self.last_start, i_end - i_start)
+        self.last_start = start
         return out
 
 
@@ -51,6 +66,7 @@ class Caller:
         self.coral = Coral(model_file)
 
     def basecall(self, raw_signal):
+#        print("file start", datetime.now())
         b_len, s_len, _ = self.coral.input_shape()
 
         pad = 3 * 100
@@ -71,6 +87,7 @@ class Caller:
 
         res = []
         while pos < len(raw_signal):
+#            a_start = datetime.now()
             # assemble batch
             data = []
             crop = []
@@ -83,8 +100,12 @@ class Caller:
                 pos += s_len - 2 * pad
             b_signal = np.stack(data)
             b_signal = b_signal.reshape((b_len, s_len, 1))
+#            call_start = datetime.now()
+#            print(b_signal.shape)
             b_out = self.coral.call(b_signal)
+#            call_end = datetime.now()
 
+#            print("a", b_out.shape)
             b_out = np.split(b_out, b_len)
             for out, c in zip(b_out, crop):
                 out = out.reshape((-1, 5))
@@ -99,6 +120,8 @@ class Caller:
                     out, alphabet, beam_size=5, beam_cut_threshold=0.1
                 )
                 res.append(seq)
+#            fin_end = datetime.now()
+#            print("timing ass", call_start - a_start, "call", call_end - call_start, "fin", fin_end - call_end)
 
         bases = "".join(res)
         return bases, None  # "B" * len(bases)
