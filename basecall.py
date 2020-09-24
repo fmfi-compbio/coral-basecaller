@@ -40,17 +40,9 @@ def caller_process(model, qin, qout):
         if item is None:
             qout.put(None)
             break 
-        if item[0] == 1:
-            qout.put(item)
-            continue
         signal = item[1]
-        #c_start = datetime.datetime.now()
         b_out = coral.call_raw(signal)
-        #c_end = datetime.datetime.now()
-        #now = datetime.datetime.now()
-        #print(now - last, item[0], c_end - c_start)
-        #last = now
-        qout.put((0, b_out, item[2]))
+        qout.put((item[0], b_out, item[2]))
 
     pass
 
@@ -62,29 +54,31 @@ def finalizer_process(fn, qin, b_len, output_details):
         item = qin.get()
         if item is None:
             break
-        if item[0] == 0:
-            _, b_out, crop = item
-            b_out = (b_out - output_quantization[1]) * output_quantization[0]
-            b_out = np.split(b_out, b_len)
-            for out, c in zip(b_out, crop):
-                out = out.reshape((-1, 5))
-                out = out[c]
-                out = softmax(out, axis=1).astype(np.float32)
 
-                ### TF has blank index 4 and we need 0
-                out = np.flip(out, axis=1)
+        bounds, b_out, crop = item
 
-                alphabet = "NTGCA"
-                seq, path = beam_search(
-                    out, alphabet, beam_size=5, beam_cut_threshold=0.1
-                )
-                # TODO: correct write
-                fo.write(seq)
-        elif item[0] == 1:
-            if got_output:
-                fo.write("\n")
-            fo.write(">%s\n" % item[1])
-            got_output = True
+        b_out = (b_out - output_quantization[1]) * output_quantization[0]
+        b_out = np.split(b_out, b_len)
+        for bound, out, c in zip(bounds, b_out, crop):
+            if bound is not None:
+                if got_output:
+                    fo.write("\n")
+                fo.write(">%s\n" % bound)
+                got_output = True
+                
+            out = out.reshape((-1, 5))
+            out = out[c]
+            out = softmax(out, axis=1).astype(np.float32)
+
+            ### TF has blank index 4 and we need 0
+            out = np.flip(out, axis=1)
+
+            alphabet = "NTGCA"
+            seq, path = beam_search(
+                out, alphabet, beam_size=5, beam_cut_threshold=0.1
+            )
+            # TODO: correct write
+            fo.write(seq)
     fo.close()
 
 
@@ -155,7 +149,7 @@ if __name__ == "__main__":
     input_details, output_details = get_params(args.model)
     input_quantization = input_details["quantization"]
     b_len, s_len, _ = input_details["shape"]
-    pad = 3 * 100
+    pad = 15
     pos = 0
  
     qcaller = mp.Queue(100)
@@ -201,34 +195,39 @@ if __name__ == "__main__":
 
     done = 0
     total_signals = 0
+    total_batches = 0
     time.sleep(5)
     start_time = datetime.datetime.now()
-    for fn in files[:100]:
+    data, crop, bounds = [], [], []
+    for fn in files:
         with get_fast5_file(fn, mode="r") as f5:
             for read in f5.get_reads():
                 start = datetime.datetime.now()
                 read_id = read.get_read_id()
-                qcaller.put((1, read_id))
                 signal = read.get_raw_data()
                 raw_signal = rescale_signal(signal)
                 total_signals += len(raw_signal)
                 pos = 0
                 while pos < len(raw_signal):
                     # assemble batch
-                    data = []
-                    crop = []
-                    for b in range(b_len):
-                        signal, pad_start, pad_end = _slice(
-                            raw_signal, pos - pad, pos - pad + s_len
-                        )
-                        crop.append(slice(max(pad, pad_start) // 3, -max(pad, pad_end) // 3))
-                        data.append(signal)
-                        pos += s_len - 2 * pad
-                    b_signal = np.stack(data)
-                    b_signal = b_signal.reshape((b_len, s_len, 1))
-                    b_signal = b_signal / input_quantization[0] + input_quantization[1]
-                    b_signal = b_signal.astype(np.int8)
-                    qcaller.put((0, b_signal, crop))
+                    signal, pad_start, pad_end = _slice(
+                        raw_signal, pos - pad, pos - pad + s_len
+                    )
+                    crop.append(slice(max(pad, pad_start) // 3, -max(pad, pad_end) // 3))
+                    data.append(signal)
+                    if pos == 0:
+                        bounds.append(read_id)
+                    else:
+                        bounds.append(None)
+                    pos += s_len - 2 * pad
+                    if len(data) == b_len:
+                        b_signal = np.stack(data)
+                        b_signal = b_signal.reshape((b_len, s_len, 1))
+                        b_signal = b_signal / input_quantization[0] + input_quantization[1]
+                        b_signal = b_signal.astype(np.int8)
+                        total_batches += b_len * s_len
+                        qcaller.put((bounds, b_signal, crop))
+                        data, crop, bounds = [], [], []
                 done += 1
                 timing = (datetime.datetime.now() - start).total_seconds()
                 print(
@@ -237,6 +236,17 @@ if __name__ == "__main__":
                     len(raw_signal) / timing,
                     file=sys.stderr,
                 )
+    if len(data) > 0:
+        while len(data) < b_len:
+            signal, pad_start, pad_end = _slice(
+                raw_signal, pos - pad, pos - pad + s_len
+            )
+            crop.append(slice(max(pad, pad_start) // 3, -max(pad, pad_end) // 3))
+            data.append(signal)
+            bounds.append(None)
+        qcaller.put((bounds, b_signal, crop))
+        total_batches += b_len * s_len
+            
 
 
 
@@ -247,4 +257,4 @@ if __name__ == "__main__":
     call_proc.join()
     fin_time = datetime.datetime.now()
     elapsed = (fin_time - start_time).total_seconds()
-    print("finalizing", datetime.datetime.now() - a, elapsed, total_signals / elapsed)
+    print("finalizing", datetime.datetime.now() - a, elapsed, total_signals / elapsed, total_batches / elapsed, total_signals, total_batches)
