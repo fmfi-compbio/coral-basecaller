@@ -13,27 +13,9 @@ from scipy.special import softmax
 from fast_ctc_decode import beam_search
 import time
 
-
-def med_mad(x, factor=1.4826):
-    """
-    Calculate signal median and median absolute deviation
-    """
-    med = np.median(x)
-    mad = np.median(np.absolute(x - med)) * factor
-    return med, mad
-
-
-def rescale_signal(signal):
-    signal = signal.astype(np.float32)
-    med, mad = med_mad(signal)
-    signal -= med
-    signal /= mad
-    signal = signal.clip(-2.5, 2.5)
-    return signal
-
 def caller_process(model, qin, qout):
     coral = backend.Coral(model)
-    coral.call(np.zeros((4, 5004, 1)))
+    coral.call_raw(np.zeros((4, 5004, 1), np.int8))
     last = datetime.datetime.now()
     while True:
         item = qin.get()
@@ -79,23 +61,9 @@ def finalizer_process(fn, qin, b_len, output_details):
             )
             # TODO: correct write
             fo.write(seq)
+    if got_output:
+        fo.write("\n")
     fo.close()
-
-
-def call_file(filename):
-    out = []
-    try:
-        with get_fast5_file(filename, mode="r") as f5:
-            for read in f5.get_reads():
-                read_id = read.get_read_id()
-                signal = read.get_raw_data()
-                signal = rescale_signal(signal)
-
-                basecall, qual = caller.basecall(signal)
-                out.append((read_id, basecall, qual, len(signal)))
-    except OSError:
-        return []
-    return out
 
 
 def write_output(read_id, basecall, quals, output_file, format):
@@ -150,7 +118,6 @@ if __name__ == "__main__":
     input_quantization = input_details["quantization"]
     b_len, s_len, _ = input_details["shape"]
     pad = 15
-    pos = 0
  
     qcaller = mp.Queue(100)
     qfinalizer = mp.Queue()
@@ -180,18 +147,6 @@ if __name__ == "__main__":
     else:
         beam_cut_threshold = args.beam_cut_threshold
 
-    def _slice(raw_signal, start, end):
-        pad_start = max(0, -start)
-        pad_end = min(max(0, end - len(raw_signal)), end - start)
-        return (
-            np.pad(
-                raw_signal[max(0, start) : min(end, len(raw_signal))],
-                (pad_start, pad_end),
-                constant_values=(0, 0),
-            ),
-            pad_start,
-            pad_end,
-        )
 
     done = 0
     total_signals = 0
@@ -205,21 +160,11 @@ if __name__ == "__main__":
                 start = datetime.datetime.now()
                 read_id = read.get_read_id()
                 signal = read.get_raw_data()
-                raw_signal = rescale_signal(signal)
-                total_signals += len(raw_signal)
-                pos = 0
-                while pos < len(raw_signal):
-                    # assemble batch
-                    signal, pad_start, pad_end = _slice(
-                        raw_signal, pos - pad, pos - pad + s_len
-                    )
-                    crop.append(slice(max(pad, pad_start) // 3, -max(pad, pad_end) // 3))
-                    data.append(signal)
-                    if pos == 0:
-                        bounds.append(read_id)
-                    else:
-                        bounds.append(None)
-                    pos += s_len - 2 * pad
+                total_signals += len(signal)
+                for b, s, c in backend.signal_to_chunks(signal, read_id, s_len, pad):
+                    crop.append(c)
+                    data.append(s)
+                    bounds.append(b)
                     if len(data) == b_len:
                         b_signal = np.stack(data)
                         b_signal = b_signal.reshape((b_len, s_len, 1))
@@ -228,22 +173,26 @@ if __name__ == "__main__":
                         total_batches += b_len * s_len
                         qcaller.put((bounds, b_signal, crop))
                         data, crop, bounds = [], [], []
+
                 done += 1
                 timing = (datetime.datetime.now() - start).total_seconds()
                 print(
                     "done %d/%d" % (done, len(files)),
-                    timing, len(raw_signal),
-                    len(raw_signal) / timing,
+                    timing, len(signal),
+                    len(signal) / timing,
                     file=sys.stderr,
                 )
+
+
     if len(data) > 0:
         while len(data) < b_len:
-            signal, pad_start, pad_end = _slice(
-                raw_signal, pos - pad, pos - pad + s_len
-            )
-            crop.append(slice(max(pad, pad_start) // 3, -max(pad, pad_end) // 3))
-            data.append(signal)
+            crop.append(slice(0, 0))
+            data.append(data[-1])
             bounds.append(None)
+        b_signal = np.stack(data)
+        b_signal = b_signal.reshape((b_len, s_len, 1))
+        b_signal = b_signal / input_quantization[0] + input_quantization[1]
+        b_signal = b_signal.astype(np.int8)
         qcaller.put((bounds, b_signal, crop))
         total_batches += b_len * s_len
             
