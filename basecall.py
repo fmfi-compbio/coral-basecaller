@@ -12,59 +12,7 @@ import backend
 from scipy.special import softmax
 from fast_ctc_decode import beam_search
 import time
-
-def caller_process(model, qin, qout):
-    coral = backend.Coral(model)
-    coral.call_raw(np.zeros((4, 5004, 1), np.int8))
-    last = datetime.datetime.now()
-    while True:
-        item = qin.get()
-        if item is None:
-            qout.put(None)
-            break 
-        signal = item[1]
-        b_out = coral.call_raw(signal)
-        qout.put((item[0], b_out, item[2]))
-
-    pass
-
-def finalizer_process(fn, qin, b_len, output_details):
-    fo = open(fn, "w")
-    got_output = False
-    output_quantization = output_details["quantization"]
-    while True:
-        item = qin.get()
-        if item is None:
-            break
-
-        bounds, b_out, crop = item
-
-        b_out = (b_out - output_quantization[1]) * output_quantization[0]
-        b_out = np.split(b_out, b_len)
-        for bound, out, c in zip(bounds, b_out, crop):
-            if bound is not None:
-                if got_output:
-                    fo.write("\n")
-                fo.write(">%s\n" % bound)
-                got_output = True
-                
-            out = out.reshape((-1, 5))
-            out = out[c]
-            out = softmax(out, axis=1).astype(np.float32)
-
-            ### TF has blank index 4 and we need 0
-            out = np.flip(out, axis=1)
-
-            alphabet = "NTGCA"
-            seq, path = beam_search(
-                out, alphabet, beam_size=5, beam_cut_threshold=0.1
-            )
-            # TODO: correct write
-            fo.write(seq)
-    if got_output:
-        fo.write("\n")
-    fo.close()
-
+import queue
 
 def write_output(read_id, basecall, quals, output_file, format):
     if len(basecall) == 0:
@@ -77,11 +25,6 @@ def write_output(read_id, basecall, quals, output_file, format):
         print(basecall, file=fout)
         print("+", file=fout)
         print(quals, file=fout)
-
-def get_params(model):
-    coral = backend.Coral(model)
-    return coral.interpreter.get_input_details()[0], coral.interpreter.get_output_details()[0]
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fast caller for ONT reads")
@@ -106,7 +49,8 @@ if __name__ == "__main__":
         default=None,
         help="Threshold for creating beams (higher means faster beam search, but smaller accuracy). Values higher than 0.2 might lead to weird errors. Default 0.1 for 48,...,96 and 0.0001 for 256",
     )
-    parser.add_argument("--output-format", choices=["fasta", "fastq"], default="fasta")
+    # TODO: fastq
+    #parser.add_argument("--output-format", choices=["fasta", "fastq"], default="fasta")
     parser.add_argument(
         "--gzip-output", action="store_true", help="Compress output with gzip"
     )
@@ -114,17 +58,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    input_details, output_details = get_params(args.model)
-    input_quantization = input_details["quantization"]
-    b_len, s_len, _ = input_details["shape"]
-    pad = 15
- 
-    qcaller = mp.Queue(100)
-    qfinalizer = mp.Queue()
-    call_proc = mp.Process(target=caller_process, args=(args.model, qcaller, qfinalizer))
-    final_proc = mp.Process(target=finalizer_process, args=(args.output, qfinalizer, b_len, output_details))
-    call_proc.start()
-    final_proc.start()
+    qin = mp.Queue(100)
+    qout = mp.Queue()
+
+    caller = backend.Basecaller(args.model, qin, qout)
 
     files = args.reads if args.reads else []
     if args.directory:
@@ -147,6 +84,10 @@ if __name__ == "__main__":
     else:
         beam_cut_threshold = args.beam_cut_threshold
 
+    if args.gzip_output:
+        fout = gzip.open(args.output, "wt")
+    else:
+        fout = open(args.output, "w")
 
     done = 0
     total_signals = 0
@@ -154,6 +95,8 @@ if __name__ == "__main__":
     time.sleep(5)
     start_time = datetime.datetime.now()
     data, crop, bounds = [], [], []
+    sent = 0
+    received = 0
     for fn in files:
         with get_fast5_file(fn, mode="r") as f5:
             for read in f5.get_reads():
@@ -161,19 +104,8 @@ if __name__ == "__main__":
                 read_id = read.get_read_id()
                 signal = read.get_raw_data()
                 total_signals += len(signal)
-                for b, s, c in backend.signal_to_chunks(signal, read_id, s_len, pad):
-                    crop.append(c)
-                    data.append(s)
-                    bounds.append(b)
-                    if len(data) == b_len:
-                        b_signal = np.stack(data)
-                        b_signal = b_signal.reshape((b_len, s_len, 1))
-                        b_signal = b_signal / input_quantization[0] + input_quantization[1]
-                        b_signal = b_signal.astype(np.int8)
-                        total_batches += b_len * s_len
-                        qcaller.put((bounds, b_signal, crop))
-                        data, crop, bounds = [], [], []
-
+                qin.put((read_id, signal))
+                sent += 1
                 done += 1
                 timing = (datetime.datetime.now() - start).total_seconds()
                 print(
@@ -183,27 +115,24 @@ if __name__ == "__main__":
                     file=sys.stderr,
                 )
 
+                while sent - received > 20:
+                    try:
+                        name, seq = qout.get(False)
+                        write_output(name, seq, None, fout, "fasta")
+                        received += 1
+                    except queue.Empty:
+                        break
 
-    if len(data) > 0:
-        while len(data) < b_len:
-            crop.append(slice(0, 0))
-            data.append(data[-1])
-            bounds.append(None)
-        b_signal = np.stack(data)
-        b_signal = b_signal.reshape((b_len, s_len, 1))
-        b_signal = b_signal / input_quantization[0] + input_quantization[1]
-        b_signal = b_signal.astype(np.int8)
-        qcaller.put((bounds, b_signal, crop))
-        total_batches += b_len * s_len
-            
+    qin.put(None)
 
-
-
+    while sent - received > 0:
+        name, seq = qout.get()
+        write_output(name, seq, None, fout, "fasta")
+        received += 1
+       
     a = datetime.datetime.now()
-    qcaller.put(None)
-    final_proc.join()
-    qcaller.put(None)
-    call_proc.join()
+    caller.terminate()
     fin_time = datetime.datetime.now()
     elapsed = (fin_time - start_time).total_seconds()
     print("finalizing", datetime.datetime.now() - a, elapsed, total_signals / elapsed, total_batches / elapsed, total_signals, total_batches)
+    fout.close()
