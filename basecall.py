@@ -58,10 +58,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    qin = mp.Queue(100)
-    qout = mp.Queue()
-
-    caller = backend.Basecaller(args.model, qin, qout)
 
     files = args.reads if args.reads else []
     if args.directory:
@@ -88,6 +84,11 @@ if __name__ == "__main__":
         fout = gzip.open(args.output, "wt")
     else:
         fout = open(args.output, "w")
+
+    qin = mp.Queue(100)
+    qout = mp.Queue()
+
+    caller = backend.Basecaller(args.model, qin, qout, beam_size=beam_size, beam_cut_threshold=beam_cut_threshold)
 
     done = 0
     total_signals = 0

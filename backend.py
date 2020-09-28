@@ -91,7 +91,7 @@ def caller_process(model, qin, qout):
         b_out = coral.call_raw(signal)
         qout.put((item[0], b_out, item[2]))
 
-def finalizer_process(qin, qout, output_details):
+def finalizer_process(qin, qout, output_details, beam_size, beam_cut_threshold):
     output_quantization = output_details["quantization"]
     cur_name = ""
     cur_out = []
@@ -120,7 +120,7 @@ def finalizer_process(qin, qout, output_details):
 
             alphabet = "NTGCA"
             seq, path = beam_search(
-                out, alphabet, beam_size=5, beam_cut_threshold=0.1
+                out, alphabet, beam_size=beam_size, beam_cut_threshold=beam_cut_threshold
             )
             # TODO: correct write
             cur_out.append(seq)
@@ -165,7 +165,7 @@ def batch_process(qin, qout, input_details, pad):
 
 
 class Basecaller:
-    def __init__(self, model_file, input_q, output_q, pad=15):
+    def __init__(self, model_file, input_q, output_q, pad=15, beam_size=5, beam_cut_threshold=0.1):
         self.input_details, self.output_details = self._get_params(model_file)
         b_len, s_len, _ = self.input_details["shape"]
 
@@ -175,7 +175,7 @@ class Basecaller:
 
         self.batcher_proc = mp.Process(target=batch_process, args=(input_q, call_q, self.input_details, pad)) 
         self.caller_proc = mp.Process(target=caller_process, args=(model_file, call_q, final_q))
-        self.final_proc = mp.Process(target=finalizer_process, args=(final_q, output_q, self.output_details))
+        self.final_proc = mp.Process(target=finalizer_process, args=(final_q, output_q, self.output_details, beam_size, beam_cut_threshold)) 
 
         self.batcher_proc.start()
         self.caller_proc.start()
@@ -186,7 +186,6 @@ class Basecaller:
         return coral.interpreter.get_input_details()[0], coral.interpreter.get_output_details()[0]
 
     def terminate(self):
-        self.input_q.put(None)
         self.final_proc.join()
         self.caller_proc.join()
         self.batcher_proc.join()
