@@ -116,9 +116,9 @@ def finalizer_process(qin, qout, output_details, beam_size, beam_cut_threshold):
             out = softmax(out, axis=1).astype(np.float32)
 
             ### TF has blank index 4 and we need 0
-            out = np.flip(out, axis=1)
+#            out = np.flip(out, axis=1)
 
-            alphabet = "NTGCA"
+            alphabet = "NACGT"
             seq, path = beam_search(
                 out, alphabet, beam_size=beam_size, beam_cut_threshold=beam_cut_threshold
             )
