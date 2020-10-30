@@ -1,0 +1,12 @@
+certifi==2020.6.20
+fast-ctc-decode==0.2.5
+h5py==2.10.0
+numpy==1.19.2
+ont-fast5-api==3.1.6
+packaging==20.4
+progressbar33==2.4
+pyparsing==2.4.7
+pysam==0.16.0.1
+scipy==1.5.2
+six==1.15.0
+tflite-runtime @ https://dl.google.com/coral/python/tflite_runtime-2.1.0.post1-cp37-cp37m-linux_x86_64.whl
