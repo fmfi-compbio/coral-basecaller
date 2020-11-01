@@ -14,5 +14,8 @@ Install [tflite runtime](https://www.tensorflow.org/lite/guide/python).
 
 `./basecall.py --model networks/paper_both_init3_f128_k21_r5_edgetpu.tflite  --directory your_directory/ --output output.fasta`
 
-You can use different tflite files you get different speed/accuracy tradeoff (lower k means higher speed and smaller accuracy).
-Also use `*_edgetpu.tflite` files. The other ones are just for visualisation (you can use netron for that).
+You can use different tflite files you get different speed/accuracy tradeoff (lower depthwise kernel `k` means higher speed and smaller accuracy).
+Use `*_edgetpu.tflite` files for accelerated Coral inference. 
+
+In case you don't have Coral device and want to test our accuracy, use original files. Note, however, that Tensorflow Lite is *not* optimized for x86_64 inference and it will be terribly slow (Google has it on a roadmap https://www.tensorflow.org/lite/guide/roadmap).
+You can also use non-edgetpu files for visualisation of the architecture (use https://netron.app/ for that). 
