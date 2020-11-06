@@ -19,3 +19,7 @@ Use `*_edgetpu.tflite` files for accelerated Coral inference.
 
 In case you don't have Coral device and want to test our accuracy, use original files. Note, however, that Tensorflow Lite is *not* optimized for x86_64 inference and it will be terribly slow (Google has it on a roadmap https://www.tensorflow.org/lite/guide/roadmap).
 You can also use non-edgetpu files for visualisation of the architecture (use https://netron.app/ for that). 
+
+## Reproducing results
+
+If you wish to reproduce results from our paper (TODO: arxiv link), head to https://github.com/fmfi-compbio/coral-benchmark and to https://github.com/fmfi-compbio/coral-training/
