@@ -26,4 +26,4 @@ Finally, you can also use non-edgetpu files for visualisation of the architectur
 
 ## Reproducing results
 
-If you wish to reproduce results from our paper (TODO: arxiv link), head to https://github.com/fmfi-compbio/coral-benchmark and to https://github.com/fmfi-compbio/coral-training/
+If you wish to reproduce results from our paper (https://arxiv.org/abs/2011.04312), head to https://github.com/fmfi-compbio/coral-benchmark and to https://github.com/fmfi-compbio/coral-training/
