@@ -9,7 +9,7 @@ Before proceeding further, ensure that you have python3 (~3.7) installed and tha
 Then install [edge TPU runtime](https://coral.ai/docs/accelerator/get-started#1-install-the-edge-tpu-runtime).
 We strongly recommend using maximum frequency version and plugging the device into USB3 port.
 
-Install requirements via `pip install -r requirements.txt`
+Install requirements via `pip install -r requirements.txt`. Note that we have fixed version for Linux/Ubuntu so if you are on Mac you should edit requirements to correct platform.
 
 Install [tflite runtime](https://www.tensorflow.org/lite/guide/python).
 
