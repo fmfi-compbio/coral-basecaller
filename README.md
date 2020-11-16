@@ -4,12 +4,15 @@
 
 First you need [Coral TPU accelerator](https://coral.ai/products/accelerator/) plugged into your USB port.
 
-Before proceeding further, ensure that you have python3 (~3.7) installed and that `/bin/env python` referst to it. If you are using `conda`, you can just create environment as `conda create --name myenv python=3.7` and then activate myenv. Alternatively, you can try adjusting `python` to `python3` in `basecall.py` and use `pip3` instead of `pip`.
+Before proceeding further, ensure that you have python3 (~3.7) installed and that `/bin/env python` refers to it.
+If you are using `conda`, you can just create environment as `conda create --name myenv python=3.7` and then activate myenv.
+Alternatively, you can try adjusting `python` to `python3` in `basecall.py` and use `pip3` instead of `pip`.
 
 Then install [edge TPU runtime](https://coral.ai/docs/accelerator/get-started#1-install-the-edge-tpu-runtime).
 We strongly recommend using maximum frequency version and plugging the device into USB3 port.
 
-Install requirements via `pip install -r requirements.txt`. Note that we have fixed version for Linux/Ubuntu so if you are on Mac you should edit requirements to correct platform.
+Install requirements via `pip install -r requirements.txt`.
+Note that we have fixed version for Linux/Ubuntu so if you are on Mac you should edit requirements to correct platform.
 
 Install [tflite runtime](https://www.tensorflow.org/lite/guide/python).
 
