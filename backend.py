@@ -170,20 +170,26 @@ class Basecaller:
         b_len, s_len, _ = self.input_details["shape"]
 
         self.input_q = input_q
-        call_q = mp.Queue(100)
-        final_q = mp.Queue()
+        self.call_q = mp.Queue(100)
+        self.final_q = mp.Queue()
+        self.output_q = output_q
 
-        self.batcher_proc = mp.Process(target=batch_process, args=(input_q, call_q, self.input_details, pad)) 
-        self.caller_proc = mp.Process(target=caller_process, args=(model_file, call_q, final_q))
-        self.final_proc = mp.Process(target=finalizer_process, args=(final_q, output_q, self.output_details, beam_size, beam_cut_threshold)) 
+        self.batcher_proc = mp.Process(target=batch_process, args=(self.input_q, self.call_q, self.input_details, pad)) 
+        self.caller_proc = mp.Process(target=caller_process, args=(model_file, self.call_q, self.final_q))
+        self.final_proc = mp.Process(target=finalizer_process, args=(self.final_q, self.output_q, self.output_details, beam_size, beam_cut_threshold)) 
 
         self.batcher_proc.start()
         self.caller_proc.start()
         self.final_proc.start()
 
+
     def _get_params(self, model):
         coral = Coral(model)
-        return coral.interpreter.get_input_details()[0], coral.interpreter.get_output_details()[0]
+        input_details_raw = coral.interpreter.get_input_details()[0]
+        output_details_raw = coral.interpreter.get_output_details()[0]
+        return {"quantization": input_details_raw["quantization"],
+                "shape": input_details_raw["shape"].tolist()}, \
+               {"quantization": output_details_raw["quantization"]}
 
     def terminate(self):
         self.final_proc.join()

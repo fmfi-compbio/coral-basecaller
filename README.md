@@ -20,6 +20,8 @@ Install [tflite runtime](https://www.tensorflow.org/lite/guide/python).
 
 `./basecall.py --model networks/paper_both_init3_f128_k21_r5_edgetpu.tflite  --directory your_directory/ --output output.fasta`
 
+On OSX you might need to add `--mp-spawn` argument to fix some multiprocessing issues.
+
 You can use different tflite files you get different speed/accuracy tradeoff (lower depthwise kernel `k` means higher speed and smaller accuracy).
 Use `*_edgetpu.tflite` files for accelerated Coral inference. 
 

@@ -13,6 +13,7 @@ from scipy.special import softmax
 from fast_ctc_decode import beam_search
 import time
 import queue
+import multiprocessing
 
 def write_output(read_id, basecall, quals, output_file, format):
     if len(basecall) == 0:
@@ -54,10 +55,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--gzip-output", action="store_true", help="Compress output with gzip"
     )
+    parser.add_argument(
+        "--mp-spawn", action="store_true", help="Use spawn method for multiprocess (should help on OSX)"
+    )
 
 
     args = parser.parse_args()
 
+    if args.mp_spawn:
+        multiprocessing.set_start_method('spawn')
 
     files = args.reads if args.reads else []
     if args.directory:
