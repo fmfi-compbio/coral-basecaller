@@ -20,7 +20,10 @@ Install [tflite runtime](https://www.tensorflow.org/lite/guide/python).
 
 `./basecall.py --model networks/paper_both_init3_f128_k21_r5_edgetpu.tflite  --directory your_directory/ --output output.fasta`
 
-Use `--watch` is you wish to run live basecalling while sequencing. You may need to adjust `--wait-since-last-write` if you suspect that we try to basecall file that is still being written byt MinKnow.
+Use `--watch` is you wish to run live basecalling while sequencing.
+You may need to adjust `--wait-since-last-write` if you suspect that we try to basecall file that is still being written byt MinKNOW.
+Also, be sure to adjust number of reads being written to the same file when starting the run -- we can't really do live basecalling if we need to wait for 4000 reads to be saved into a single file.
+A value of 100 should be a good tradeoff between the number of produced fast5 files and processing latency.
 
 On OSX you might need to add `--mp-spawn` argument to fix some multiprocessing issues.
 
