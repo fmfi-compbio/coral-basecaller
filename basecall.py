@@ -27,6 +27,47 @@ def write_output(read_id, basecall, quals, output_file, format):
         print("+", file=fout)
         print(quals, file=fout)
 
+def listdir(directory_name):
+    for fname in os.listdir(directory_name):
+        fname = os.path.join(directory_name, fname)
+        if os.path.isdir(fname):
+            yield from listdir(fname)
+        if fname.endswith(".fast5"):
+            yield fname
+
+class Watcher:
+    def __init__(self, directories, stability_threshold=5, sleep=1):
+        self.candidates = set()
+        self.done = set()
+
+        def gen():
+            while True:
+                for directory_name in directories:
+                    new_cnt = 0
+                    for f in listdir(directory_name):
+                        if f not in self.done and f not in self.candidates:
+                            new_cnt += 1
+                            self.candidates.add(f)
+                    if new_cnt:
+                        print("Found %d new files since last time" % new_cnt)
+                for f in list(self.candidates):
+                    if os.stat(f).st_mtime + stability_threshold < time.time():
+                        self.candidates.remove(f)
+                        self.done.add(f)
+                        yield f
+                    else:
+                        print("File modified recently, waiting to stabilize", f)
+                yield None
+                print("Watching for changed files...")
+                time.sleep(sleep)
+        self.gen = gen()
+
+    def __iter__(self):
+        return self.gen
+    
+    def __len__(self):
+        return len(self.candidates) + len(self.done)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fast caller for ONT reads")
 
@@ -50,6 +91,23 @@ if __name__ == "__main__":
         default=None,
         help="Threshold for creating beams (higher means faster beam search, but smaller accuracy). Values higher than 0.2 might lead to weird errors. Default 0.1 for 48,...,96 and 0.0001 for 256",
     )
+    parser.add_argument(
+        "--watch",
+        default=False,
+        action="store_true"
+    )
+    parser.add_argument(
+        "--watch-sleep",
+        default=10,
+        type=int,
+        help="Seconds to sleep between directory watches"
+    )
+    parser.add_argument(
+        "--wait-since-last-write",
+        default=5,
+        type=int,
+        help="Seconds to wait from last write before marking newly discovered file as safe to process"
+    )
     # TODO: fastq
     #parser.add_argument("--output-format", choices=["fasta", "fastq"], default="fasta")
     parser.add_argument(
@@ -59,22 +117,27 @@ if __name__ == "__main__":
         "--mp-spawn", action="store_true", help="Use spawn method for multiprocess (should help on OSX)"
     )
 
-
     args = parser.parse_args()
 
     if args.mp_spawn:
         multiprocessing.set_start_method('spawn')
 
-    files = args.reads if args.reads else []
-    if args.directory:
-        for directory_name in args.directory:
-            files += [
-                os.path.join(directory_name, fn) for fn in os.listdir(directory_name)
-            ]
-
-    if len(files) == 0:
-        print("Zero input reads, nothing to do.")
-        sys.exit()
+    if not args.watch:
+        files = args.reads if args.reads else []
+        if args.directory:
+            for directory_name in args.directory:
+                files.extend(listdir(directory_name))
+        if len(files) == 0 and not args.watch:
+            print("Zero input reads, nothing to do.")
+            sys.exit(0)
+    else:
+        if args.reads:
+            print("--reads and --watch combination is unsupported")
+            sys.exit(1)
+        if not args.directory:
+            print("--directory must be supplied when using --watch")
+            sys.exit(1)
+        files = Watcher(args.directory, args.wait_since_last_write, args.watch_sleep)
 
     if args.beam_size is None:
         beam_size = 5
@@ -91,55 +154,78 @@ if __name__ == "__main__":
     else:
         fout = open(args.output, "w")
 
-    qin = mp.Queue(100)
+    qin = mp.Queue(30)
     qout = mp.Queue()
 
     caller = backend.Basecaller(args.model, qin, qout, beam_size=beam_size, beam_cut_threshold=beam_cut_threshold)
 
-    done = 0
     total_signals = 0
-    total_batches = 0
+    total_reads = 0
+    total_bases = 0
     time.sleep(5)
     start_time = datetime.datetime.now()
     data, crop, bounds = [], [], []
-    sent = 0
-    received = 0
-    for fn in files:
-        with get_fast5_file(fn, mode="r") as f5:
-            for read in f5.get_reads():
-                start = datetime.datetime.now()
-                read_id = read.get_read_id()
-                signal = read.get_raw_data()
-                total_signals += len(signal)
-                qin.put((read_id, signal))
-                sent += 1
-                done += 1
-                timing = (datetime.datetime.now() - start).total_seconds()
-                print(
-                    "done %d/%d" % (done, len(files)),
-                    timing, len(signal),
-                    len(signal) / timing,
-                    file=sys.stderr,
-                )
+    outstanding = 0
 
-                while sent - received > 20:
-                    try:
-                        name, seq = qout.get(False)
-                        write_output(name, seq, None, fout, "fasta")
-                        received += 1
-                    except queue.Empty:
-                        break
+    def read_files(files):
+        for fn in files:
+            if fn is None:
+                # in --watch but no new files to process
+                yield None
+                continue
+            try:
+                with get_fast5_file(fn, mode="r") as f5:
+                    for read in f5.get_reads():
+                        read_id = read.get_read_id()
+                        signal = read.get_raw_data()
+                        yield signal, dict(read_id=read_id, samples=len(signal))
+            except Exception as e:
+                print(e, file=sys.stderr)
 
-    qin.put(None)
+    def drain_result_queue(outstanding_limit, block):
+        global outstanding, total_bases, total_reads, total_signals
+        while outstanding > outstanding_limit:
+            try:
+                metadata, seq = qout.get(block=block)
+                total_bases += len(seq)
+                total_reads += 1
+                total_signals += metadata["samples"]
+                write_output(metadata["read_id"], seq, None, fout, "fasta")
+                outstanding -= 1
+                print("done %d/%d" % (total_reads, len(files)), metadata["samples"], len(seq))
+            except queue.Empty:
+                break
 
-    while sent - received > 0:
-        name, seq = qout.get()
-        write_output(name, seq, None, fout, "fasta")
-        received += 1
-       
-    a = datetime.datetime.now()
+    print("Starting...")
+    try:
+        for item in read_files(files):
+            if item is None:
+                # in --watch and no new files to process, finish outstanding
+                drain_result_queue(0, True)
+                continue
+            read_id, signal = item
+
+            qin.put((read_id, signal))
+            outstanding += 1
+
+            drain_result_queue(20, False)
+
+        qin.put(None)
+        drain_result_queue(0, True)
+    except KeyboardInterrupt as error:
+        print("Interrupted, cleaning up...")
+        pass
+
     caller.terminate()
+
     fin_time = datetime.datetime.now()
     elapsed = (fin_time - start_time).total_seconds()
-    print("finalizing", datetime.datetime.now() - a, elapsed, total_signals / elapsed, total_batches / elapsed, total_signals, total_batches)
+    print("--------------------")
+    print("Basecalling finished")
+    print("Elapsed time (sec)", elapsed)
+    print("Reads processed", total_reads)
+    print("Signals processed (M)", "%.4f" % (total_signals / 1e6))
+    print("Bases called (M)", "%0.4f" % (total_bases / 1e6))
+    print("Basecalling speed (Msamples/sec)", "%.2f" % (total_signals / 1e6 / elapsed))
     fout.close()
+    sys.exit(0)

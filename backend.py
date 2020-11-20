@@ -5,6 +5,7 @@ from scipy.special import softmax
 from fast_ctc_decode import beam_search
 from datetime import datetime
 import multiprocessing as mp
+import queue
 
 EDGETPU_SHARED_LIB = {
     "Linux": "libedgetpu.so.1",
@@ -65,7 +66,7 @@ def rescale_signal(signal):
     signal = signal.clip(-2.5, 2.5)
     return signal
 
-def signal_to_chunks(raw_signal, read_id, s_len, pad):
+def signal_to_chunks(raw_signal, metadata, s_len, pad):
     raw_signal = rescale_signal(raw_signal)
     pos = 0
     while pos < len(raw_signal):
@@ -74,7 +75,7 @@ def signal_to_chunks(raw_signal, read_id, s_len, pad):
             raw_signal, pos - pad, pos - pad + s_len
         )
         crop = slice(max(pad, pad_start) // 3, -max(pad, pad_end) // 3)
-        bound = read_id if pos == 0 else None
+        bound = metadata if pos == 0 else None
         pos += s_len - 2 * pad
 
         yield (bound, signal, crop)
@@ -84,6 +85,9 @@ def caller_process(model, qin, qout):
     coral.call_raw(np.zeros((4, 5004, 1), np.int8))
     while True:
         item = qin.get()
+        if item == "wait":
+            qout.put("wait")
+            continue
         if item is None:
             qout.put(None)
             break 
@@ -93,70 +97,84 @@ def caller_process(model, qin, qout):
 
 def finalizer_process(qin, qout, output_details, beam_size, beam_cut_threshold):
     output_quantization = output_details["quantization"]
-    cur_name = ""
-    cur_out = []
-    while True:
-        item = qin.get()
-        if item is None:
-            break
 
-        bounds, b_out, crop = item
 
-        b_out = (b_out - output_quantization[1]) * output_quantization[0]
-        b_out = np.split(b_out, b_out.shape[0])
-        for bound, out, c in zip(bounds, b_out, crop):
-            if bound is not None:
-                if len(cur_out) > 0:
-                    qout.put((cur_name, "".join(cur_out)))
-                cur_out = []
-                cur_name = bound
-                
-            out = out.reshape((-1, 5))
-            out = out[c]
-            out = softmax(out, axis=1).astype(np.float32)
+    item = "wait"
+    while item == "wait":
+        cur_name = ""
+        cur_out = []
 
-            ### TF has blank index 4 and we need 0
-#            out = np.flip(out, axis=1)
+        while True:
+            item = qin.get()
+            if item is None or item == "wait":
+                break
 
-            alphabet = "NACGT"
-            seq, path = beam_search(
-                out, alphabet, beam_size=beam_size, beam_cut_threshold=beam_cut_threshold
-            )
-            # TODO: correct write
-            cur_out.append(seq)
-    if len(cur_out) > 0:
-        qout.put((cur_name, "".join(cur_out)))
+            bounds, b_out, crop = item
+
+            b_out = (b_out - output_quantization[1]) * output_quantization[0]
+            b_out = np.split(b_out, b_out.shape[0])
+            for bound, out, c in zip(bounds, b_out, crop):
+                if bound is not None:
+                    if len(cur_out) > 0:
+                        qout.put((cur_name, "".join(cur_out)))
+                    cur_out = []
+                    cur_name = bound
+                    
+                out = out.reshape((-1, 5))
+                out = out[c]
+                out = softmax(out, axis=1).astype(np.float32)
+
+                ### TF has blank index 4 and we need 0
+    #            out = np.flip(out, axis=1)
+
+                alphabet = "NACGT"
+                seq, path = beam_search(
+                    out, alphabet, beam_size=beam_size, beam_cut_threshold=beam_cut_threshold
+                )
+                # TODO: correct write
+                cur_out.append(seq)
+        if len(cur_out) > 0:
+            qout.put((cur_name, "".join(cur_out)))
 
 def batch_process(qin, qout, input_details, pad):
     input_quantization = input_details["quantization"]
     b_len, s_len, _ = input_details["shape"]
-    data, crop, bounds = [], [], []
-    while True:
-        item = qin.get()
-        if item is None:
-            break
-        name, signal = item
-        for b, s, c in signal_to_chunks(signal, name, s_len, pad):
-            crop.append(c)
-            data.append(s)
-            bounds.append(b)
-            if len(data) == b_len:
-                b_signal = np.stack(data)
-                b_signal = b_signal.reshape((b_len, s_len, 1))
-                b_signal = b_signal / input_quantization[0] + input_quantization[1]
-                b_signal = b_signal.astype(np.int8)
-                qout.put((bounds, b_signal, crop))
-                data, crop, bounds = [], [], []
-    if len(data) > 0:
-        while len(data) < b_len:
-            crop.append(slice(0, 0))
-            data.append(data[-1])
-            bounds.append(None)
+    
+    def preprocess_signal(data):
         b_signal = np.stack(data)
         b_signal = b_signal.reshape((b_len, s_len, 1))
         b_signal = b_signal / input_quantization[0] + input_quantization[1]
         b_signal = b_signal.astype(np.int8)
-        qout.put((bounds, b_signal, crop))
+        return b_signal
+
+    item = "wait"
+    while item != None:
+        data, crop, bounds = [], [], []
+        while True:
+            try:
+                item = qin.get(timeout=1)
+            except queue.Empty:
+                item = "wait"
+                break
+            if item is None:
+                break
+            signal, metadata = item
+            for b, s, c in signal_to_chunks(signal, metadata, s_len, pad):
+                crop.append(c)
+                data.append(s)
+                bounds.append(b)
+                if len(data) == b_len:
+                    b_signal = preprocess_signal(data)
+                    qout.put((bounds, b_signal, crop))
+                    data, crop, bounds = [], [], []
+        if len(data) > 0:
+            while len(data) < b_len:
+                crop.append(slice(0, 0))
+                data.append(data[-1])
+                bounds.append(None)
+            b_signal = preprocess_signal(data)
+            qout.put((bounds, b_signal, crop))
+        qout.put("wait")
 
     qout.put(None)
 
@@ -192,7 +210,13 @@ class Basecaller:
                {"quantization": output_details_raw["quantization"]}
 
     def terminate(self):
-        self.final_proc.join()
-        self.caller_proc.join()
-        self.batcher_proc.join()
+        self.final_proc.join(1)
+        self.caller_proc.join(1)
+        self.batcher_proc.join(1)
+        # use force if necessary (usually after Ctrl-C)
+        self.final_proc.terminate()
+        self.caller_proc.terminate()
+        self.batcher_proc.terminate()
+        self.input_q.cancel_join_thread()
+        self.output_q.cancel_join_thread()
 
