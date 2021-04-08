@@ -109,7 +109,7 @@ if __name__ == "__main__":
         help="Seconds to wait from last write before marking newly discovered file as safe to process"
     )
     # TODO: fastq
-    #parser.add_argument("--output-format", choices=["fasta", "fastq"], default="fasta")
+    parser.add_argument("--output-format", choices=["fasta", "fastq"], default="fasta")
     parser.add_argument(
         "--gzip-output", action="store_true", help="Compress output with gzip"
     )
@@ -186,11 +186,11 @@ if __name__ == "__main__":
         global outstanding, total_bases, total_reads, total_signals
         while outstanding > outstanding_limit:
             try:
-                metadata, seq = qout.get(block=block)
+                metadata, seq, qual = qout.get(block=block)
                 total_bases += len(seq)
                 total_reads += 1
                 total_signals += metadata["samples"]
-                write_output(metadata["read_id"], seq, None, fout, "fasta")
+                write_output(metadata["read_id"], seq, qual, fout, args.output_format)
                 outstanding -= 1
                 print("done %d/%d" % (total_reads, len(files)), metadata["samples"], len(seq))
             except queue.Empty:

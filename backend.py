@@ -2,7 +2,8 @@ import tflite_runtime.interpreter as tflite
 import platform
 import numpy as np
 from scipy.special import softmax
-from fast_ctc_decode import beam_search
+#from fast_ctc_decode import beam_search
+from deepnano2 import beam_search_with_quals
 from datetime import datetime
 import multiprocessing as mp
 import queue
@@ -103,6 +104,7 @@ def finalizer_process(qin, qout, output_details, beam_size, beam_cut_threshold):
     while item == "wait":
         cur_name = ""
         cur_out = []
+        cur_qual = []
 
         while True:
             item = qin.get()
@@ -116,8 +118,9 @@ def finalizer_process(qin, qout, output_details, beam_size, beam_cut_threshold):
             for bound, out, c in zip(bounds, b_out, crop):
                 if bound is not None:
                     if len(cur_out) > 0:
-                        qout.put((cur_name, "".join(cur_out)))
+                        qout.put((cur_name, "".join(cur_out), "".join(cur_qual)))
                     cur_out = []
+                    cur_qual = []
                     cur_name = bound
                     
                 out = out.reshape((-1, 5))
@@ -128,13 +131,14 @@ def finalizer_process(qin, qout, output_details, beam_size, beam_cut_threshold):
     #            out = np.flip(out, axis=1)
 
                 alphabet = "NACGT"
-                seq, path = beam_search(
-                    out, alphabet, beam_size=beam_size, beam_cut_threshold=beam_cut_threshold
+                seq, qual = beam_search_with_quals(
+                    out, beam_size=beam_size, beam_cut_threshold=beam_cut_threshold
                 )
                 # TODO: correct write
                 cur_out.append(seq)
+                cur_qual.append(qual)
         if len(cur_out) > 0:
-            qout.put((cur_name, "".join(cur_out)))
+            qout.put((cur_name, "".join(cur_out), "".join(cur_qual)))
 
 def batch_process(qin, qout, input_details, pad):
     input_quantization = input_details["quantization"]

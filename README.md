@@ -16,6 +16,8 @@ Note that we have fixed version for Linux/Ubuntu so if you are on Mac you should
 
 Install [tflite runtime](https://www.tensorflow.org/lite/guide/python).
 
+Also you need to install deepnano2.
+
 ## Running
 
 `./basecall.py --model networks/paper_both_init3_f128_k21_r5_edgetpu.tflite  --directory your_directory/ --output output.fasta`
